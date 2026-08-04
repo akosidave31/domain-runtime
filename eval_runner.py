@@ -2,15 +2,13 @@
 """eval_runner.py - scores a pack against its own held-out eval set.
 
     python eval_runner.py ../pack-pqc
-    python eval_runner.py ../pack-pqc --noise 0.3
     python eval_runner.py ../pack-pqc --noise 0.3 --confirm 3
+    python eval_runner.py ../pack-pqc --llm --confirm 3 --verbose
 """
-import json, os, random, sys
+import glob, json, os, random, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cells.engine import Network, Contradiction
-
-MAX_RETRY = 2
+from controller import solve as controller_solve
 
 
 def oracle(truth):
@@ -38,72 +36,25 @@ def noisy(truth, rate, rng):
     return p
 
 
-def solve(schema, laws, case, proposer, verbose=False, confirm=0):
-    net = Network(schema, laws)
-    net.propagate()
-    injected = dict(case.get("inject") or {})
-    rejected, exhausted = [], set()
-
-    while True:
-        open_cells = [c for c in net.askable() if c not in exhausted]
-        if not open_cells:
-            break
-        cell = open_cells[0]
-        spec = net.cells[cell].spec
-        bound_ok = False
-        for _ in range(MAX_RETRY + 1):
-            if cell in injected:
-                value = injected.pop(cell)
-            else:
-                value = proposer(cell, spec, case["query"])
-            if value is None:
-                break
-            try:
-                net.propose(cell, value, chunk_id="eval", confidence=1.0)
-                net.propagate()
-                bound_ok = True
-                break
-            except Contradiction as e:
-                rejected.append((cell, value, str(e)))
-                if verbose:
-                    print(f"      rejected {cell}={value!r}")
-        if not bound_ok:
-            exhausted.add(cell)
-
-    for cell, value in injected.items():
-        try:
-            net.propose(cell, value, chunk_id="eval", confidence=1.0)
-            net.propagate()
-        except Contradiction as e:
-            rejected.append((cell, value, str(e)))
-
-    # confirmation: a single root proposal leaves only one path to each
-    # derived cell, so a wrong root propagates silently. Ask independently.
-    conflict = None
-    if confirm:
-        derived = [n for n, c in net.cells.items()
-                   if c.bound and c.source not in ("proposal", None)
-                   and c.spec.get("askable", True)]
-        derived.sort(key=lambda n: net.cells[n].spec.get("ask_cost", 100))
-        for cell in derived[:confirm]:
-            v = proposer(cell, net.cells[cell].spec, case["query"])
-            net.model_calls += 1
-            if v is None:
-                continue
-            if v != net.cells[cell].value:
-                conflict = (cell, net.cells[cell].value, v)
-                if verbose:
-                    print(f"      CONFLICT {cell}: derived "
-                          f"{net.cells[cell].value!r} vs proposed {v!r}")
-                break
-    return net, rejected, conflict
+def load_context(pack):
+    parts = [open(f).read()
+             for f in sorted(glob.glob(os.path.join(pack, "knowledge", "*.md")))]
+    if not parts:
+        raise SystemExit(f"no knowledge/*.md in {pack}")
+    return "\n\n".join(parts)
 
 
-def score(pack, noise, seed, verbose, confirm=0):
+def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None):
     schema = json.load(open(os.path.join(pack, "cells/schema.json")))
     laws = json.load(open(os.path.join(pack, "cells/laws.json")))["laws"]
     cases = json.load(open(os.path.join(pack, "eval/cases.json")))["cases"]
     rng = random.Random(seed)
+
+    llm_proposer = None
+    if use_llm:
+        from llm import make_proposer, ENDPOINT
+        llm_proposer = make_proposer(load_context(pack), endpoint or ENDPOINT, verbose)
+
     tot = {"exp": 0, "ok": 0, "wrong": 0, "missing": 0, "open_exp": 0,
            "open_ok": 0, "leaked": 0, "calls": 0, "derived": 0, "bound": 0,
            "rejected": 0, "conflicts": 0, "silent": 0}
@@ -111,12 +62,19 @@ def score(pack, noise, seed, verbose, confirm=0):
 
     for case in cases:
         truth = case.get("truth", {})
-        p = oracle(truth) if noise == 0 else noisy(truth, noise, rng)
-        net, rejected, conflict = solve(schema, laws, case, p, verbose, confirm)
-        if conflict:
-            tot["conflicts"] += 1
+        if llm_proposer is not None:
+            p = llm_proposer
+        else:
+            p = oracle(truth) if noise == 0 else noisy(truth, noise, rng)
+
         if verbose:
             print(f"\n  {case['id']}: {case['query']}")
+
+        r = controller_solve(schema, laws, case["query"], p, confirm=confirm,
+                             force=case.get("inject"), verbose=verbose)
+        net, rejected, conflict = r.net, r.rejected, r.conflict
+        if conflict:
+            tot["conflicts"] += 1
 
         for cell, want in case.get("expect", {}).items():
             tot["exp"] += 1
@@ -146,14 +104,14 @@ def score(pack, noise, seed, verbose, confirm=0):
         tot["bound"] += s["bound"]
         tot["rejected"] += len(rejected)
         if verbose:
-            print(f"      calls={s['model_calls']} ratio={s['propagation_ratio']}"
-                  f" rejected={len(rejected)}")
+            print(f"      status={r.status} calls={s['model_calls']} "
+                  f"ratio={s['propagation_ratio']} rejected={len(rejected)}")
 
     n = len(cases)
     acc = tot["ok"] / tot["exp"] if tot["exp"] else 0
     abst = tot["open_ok"] / tot["open_exp"] if tot["open_exp"] else 1.0
     ratio = tot["derived"] / tot["bound"] if tot["bound"] else 0
-    label = "oracle" if noise == 0 else f"noisy p={noise}"
+    label = "llm" if use_llm else ("oracle" if noise == 0 else f"noisy p={noise}")
 
     print(f"\n{'='*54}")
     print(f"pack: {os.path.basename(os.path.abspath(pack))}   "
@@ -185,7 +143,8 @@ def main():
     noise = float(sys.argv[sys.argv.index("--noise") + 1]) if "--noise" in sys.argv else 0.0
     seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 7
     confirm = int(sys.argv[sys.argv.index("--confirm") + 1]) if "--confirm" in sys.argv else 0
-    score(args[0], noise, seed, "--verbose" in sys.argv, confirm)
+    ep = sys.argv[sys.argv.index("--endpoint") + 1] if "--endpoint" in sys.argv else None
+    score(args[0], noise, seed, "--verbose" in sys.argv, confirm, "--llm" in sys.argv, ep)
     return 0
 
 
