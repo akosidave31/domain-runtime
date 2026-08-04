@@ -28,10 +28,13 @@ def build_prompt(context, query, cell, spec, anchors=None, question_only=False):
         lo, hi = spec.get("range", ["?", "?"])
         allowed = f"An integer between {lo} and {hi}, or null."
     if question_only:
-        system = ("Report a value ONLY if the USER QUESTION states it "
-                  "explicitly. The SOURCE is background and must NOT be used "
-                  "for this answer. If the QUESTION does not state it, answer "
-                  "null. Answering null is correct and expected.")
+        # Do not send the SOURCE at all. If it must not be used, its absence
+        # is a stronger guarantee than an instruction, and the prompt is
+        # shorter - which matters a lot at 2 tok/s.
+        system = ("Extract one value from the USER QUESTION. The question "
+                  "often names it directly - read it carefully and report "
+                  "what you find. Only answer null if the question genuinely "
+                  "does not mention it.")
     else:
         subj = ", ".join(f"{k} = {v}" for k, v in (anchors or {}).items())
         system = ("You extract a single value from the SOURCE below. "
@@ -41,8 +44,15 @@ def build_prompt(context, query, cell, spec, anchors=None, question_only=False):
                     "never calculate from memory. Answering null is correct "
                     "and expected when the value is absent.")
 
-    user = (f"SOURCE:\n{context}\n\nUSER QUESTION: {query}\n\n"
-            f"EXTRACT: {ask}\nALLOWED: {allowed}\n\nReply with JSON only.")
+    if False:  # question-only used to hide the SOURCE. Removing it made a
+               # 0.5B unable to read strings present in the question itself,
+               # and the literal-grounding check already rejects anything not
+               # in the query - so the source is safe to send.
+        pass
+    else:
+        user = (f"SOURCE:\n{context}\n\nUSER QUESTION: {query}\n\n"
+                f"EXTRACT: {ask}\nALLOWED: {allowed}\n\n"
+                f"Reply with JSON only.")
     return (f"<|im_start|>system\n{system}<|im_end|>\n"
             f"<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
 

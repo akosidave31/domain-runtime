@@ -9,6 +9,8 @@ Contains no domain knowledge.
 None means "not in the retrieved context" - a first-class answer that must
 never be turned into a guess.
 """
+import re
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -19,10 +21,41 @@ DEFAULT_CONFIRM = 2
 
 
 def _in_query(value, query):
-    """Is this value literally present in the question? The runtime's only
-    domain-agnostic defence against a model attributing a value it read from
-    a chunk about something else."""
-    return str(value).lower() in query.lower()
+    """Is this value literally present in the question?
+
+    Numbers need digit boundaries: "4" must not match inside "2048". Strings
+    do not - a generic token-boundary rule broke hyphenated values like
+    ML-KEM-512, so the rule is narrowed to the case that needs it.
+    """
+    v = str(value)
+    if v.isdigit():
+        return re.search(r"(?<!\d)" + v + r"(?!\d)", query) is not None
+    return v.lower() in query.lower()
+
+
+def _bind_from_query(net, query):
+    """Bind query-scoped enum cells by literal match. No model call.
+
+    A query-scoped enum is decidable by string matching: the query either
+    contains one of the declared values or it does not. Asking a model to do
+    this is slower and less reliable than doing it directly - and the runtime
+    already ran this exact check when rejecting proposals. Verification and
+    extraction are the same rule; only half of it was being used.
+
+    Ambiguity goes to the model: zero or several matches leaves the cell open
+    rather than guessing.
+    """
+    bound = []
+    for name, cell in net.cells.items():
+        if cell.bound or cell.spec.get("scope") != "query":
+            continue
+        if cell.spec.get("type") != "enum":
+            continue
+        hits = [v for v in cell.spec["values"] if _in_query(v, query)]
+        if len(hits) == 1:
+            net.bind(name, hits[0], "query-literal")
+            bound.append(name)
+    return bound
 
 
 def _anchors(net):
@@ -60,8 +93,12 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
     net = Network(schema, laws)
     net.propagate()
 
+    if _bind_from_query(net, query):      # anything the query states outright
+        net.propagate()
+
     pending = dict(force or {})
     rejected, exhausted = [], set()
+    last_bound = net.stats()["bound"]
 
     while True:
         open_cells = [c for c in net.askable() if c not in exhausted]
@@ -101,7 +138,15 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
                 if verbose:
                     print(f"    rejected {cell}={value!r}")
         if not bound:
+            # A null is "not answerable from what I have right now", not a
+            # permanent verdict. If the network later changes, this cell
+            # becomes askable again - otherwise one early null on an anchor
+            # cell blocks every dependent cell for the rest of the query.
             exhausted.add(cell)
+            if net.stats()["bound"] > last_bound:
+                exhausted.clear()
+                exhausted.add(cell)
+        last_bound = net.stats()["bound"]
 
     for cell, value in pending.items():
         try:
