@@ -140,8 +140,14 @@ class Network:
             return self.bind(t.name, a * s.value + b, law["id"], justification=[s.name])
         if t.bound and not s.bound and a != 0:
             num = t.value - b
-            if num % a == 0:
-                return self.bind(s.name, num // a, law["id"], justification=[t.name])
+            if num % a:
+                # target implies a non-integer source, but the source is an
+                # int cell. The target value is impossible under this law -
+                # not merely underdetermined. Staying silent here let a model
+                # bind 3168 to ek_bytes (implying k = 8.166) unchallenged.
+                raise Contradiction(s.name, "an integer",
+                                    f"{num}/{a}", law["id"])
+            return self.bind(s.name, num // a, law["id"], justification=[t.name])
         if s.bound and t.bound and t.value != a * s.value + b:
             raise Contradiction(t.name, t.value, a * s.value + b, law["id"])
         return False
@@ -195,7 +201,7 @@ class Network:
             return False
         num = rhs - const
         if num % coeff:
-            return False
+            raise Contradiction(u, "an integer", f"{num}/{coeff}", law["id"])
         return self.bind(u, int(num // coeff), law["id"], justification=just)
 
     def _apply_constant(self, law):
