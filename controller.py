@@ -58,6 +58,24 @@ def _bind_from_query(net, query):
     return bound
 
 
+def _plausible(schema, laws, cell, value):
+    """Could this value hold at all, in an otherwise empty network?
+
+    A confirming answer that is impossible under the pack's own laws is a
+    misread, not a disagreement. ek_bytes = 5 implies k = -27/384; treating
+    that as evidence against a derived value throws away a correct answer.
+    Only a value that could actually hold counts as a conflict.
+    """
+    probe = Network(schema, laws)
+    probe.propagate()
+    try:
+        probe.bind(cell, value, "probe")
+        probe.propagate()
+        return True
+    except Contradiction:
+        return False
+
+
 def _anchors(net):
     return {n: c.value for n, c in net.cells.items()
             if c.spec.get("anchor") and c.bound}
@@ -173,6 +191,13 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
                 continue
             if v == net.cells[cell].value:
                 confirmed.append(cell)
+            elif not _plausible(schema, laws, cell, v):
+                # impossible under the laws: the model misread which cell it
+                # was asked about, not a genuine second opinion
+                rejected.append((cell, v, "implausible confirmation, discarded"))
+                if verbose:
+                    print(f"    discarded confirmation {cell}={v!r}: "
+                          f"impossible under the pack's laws")
             else:
                 conflict = (cell, net.cells[cell].value, v)
                 if verbose:
