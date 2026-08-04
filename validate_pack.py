@@ -52,6 +52,19 @@ def check_schema(sch):
                 E.append(f"{L}: int needs 'range':[lo,hi] ints")
             elif r[0] > r[1]:
                 E.append(f"{L}: range lo>hi")
+        sc = s.get("scope")
+        if sc is not None and sc not in ("query", "source"):
+            E.append(f"{L}: scope must be 'query' or 'source', got {sc!r}")
+        if sc == "query" and t != "enum":
+            W.append(f"{L}: scope 'query' only binds literally for enum cells; "
+                     f"an int cell will fall through to the model")
+        for flag in ("anchor", "requires_anchor", "confirmable"):
+            if flag in s and not isinstance(s[flag], bool):
+                E.append(f"{L}: '{flag}' must be true or false")
+        if s.get("anchor") and sc != "query":
+            W.append(f"{L}: anchor cells are normally scope 'query' - an "
+                     f"anchor read from the source cannot identify the subject")
+
         a = s.get("askable", True)
         if not isinstance(a, bool):
             E.append(f"{L}: 'askable' must be bool")
@@ -62,6 +75,14 @@ def check_schema(sch):
                 E.append(f"{L}: ask_cost must be int")
             if not s.get("prompt"):
                 E.append(f"{L}: askable needs 'prompt'")
+    anchors = [n for n, c in sch["cells"].items()
+               if isinstance(c, dict) and c.get("anchor")]
+    needs = [n for n, c in sch["cells"].items()
+             if isinstance(c, dict) and c.get("requires_anchor")]
+    if needs and not anchors:
+        E.append(f"cells {sorted(needs)} declare requires_anchor but no cell "
+                 f"declares anchor: true - they can never be asked in source "
+                 f"mode and will never resolve")
     return sch["cells"]
 
 
@@ -189,7 +210,7 @@ def main():
         for r in ("pack.json", "routing.json", "prompt.md"):
             if not os.path.exists(os.path.join(pk, r)):
                 E.append(f"missing required file: {r}")
-        for d in ("knowledge", "grammar", "eval"):
+        for d in ("knowledge", "eval"):
             p = os.path.join(pk, d)
             if not os.path.isdir(p):
                 E.append(f"missing required dir: {d}/")
