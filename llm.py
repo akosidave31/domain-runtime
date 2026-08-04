@@ -20,25 +20,27 @@ def gbnf(spec):
     )
 
 
-def build_prompt(context, query, cell, spec):
+def build_prompt(context, query, cell, spec, anchors=None, question_only=False):
     ask = spec.get("prompt") or f"What is {cell}?"
     if spec.get("type") == "enum":
         allowed = "One of: " + ", ".join(map(str, spec["values"])) + ", or null."
     else:
         lo, hi = spec.get("range", ["?", "?"])
         allowed = f"An integer between {lo} and {hi}, or null."
-    if spec.get("scope") == "query":
-        system = ("You read the USER QUESTION and report one thing it "
-                  "specifies. Report it ONLY if the QUESTION itself names it. "
-                  "The SOURCE is background: never take this value from the "
-                  "SOURCE. If the QUESTION does not name it, answer null. "
-                  "Answering null is correct and expected.")
+    if question_only:
+        system = ("Report a value ONLY if the USER QUESTION states it "
+                  "explicitly. The SOURCE is background and must NOT be used "
+                  "for this answer. If the QUESTION does not state it, answer "
+                  "null. Answering null is correct and expected.")
     else:
+        subj = ", ".join(f"{k} = {v}" for k, v in (anchors or {}).items())
         system = ("You extract a single value from the SOURCE below. "
-                  "Answer only from the SOURCE. If the SOURCE does not state "
-                  "the value, answer null. Never guess, never calculate from "
-                  "memory, never use knowledge outside the SOURCE. Answering "
-                  "null is correct and expected when the value is absent.")
+                  + (f"The question is about {subj}. If the SOURCE describes "
+                     f"something else, answer null. " if subj else "")
+                  + "Answer only from the SOURCE or the QUESTION. Never guess, "
+                    "never calculate from memory. Answering null is correct "
+                    "and expected when the value is absent.")
+
     user = (f"SOURCE:\n{context}\n\nUSER QUESTION: {query}\n\n"
             f"EXTRACT: {ask}\nALLOWED: {allowed}\n\nReply with JSON only.")
     return (f"<|im_start|>system\n{system}<|im_end|>\n"
@@ -57,9 +59,10 @@ def call(prompt, grammar, endpoint=ENDPOINT, timeout=180):
 
 
 def make_proposer(context, endpoint=ENDPOINT, verbose=False):
-    def propose(cell, spec, query):
+    def propose(cell, spec, query, anchors=None, question_only=False):
         try:
-            raw = call(build_prompt(context, query, cell, spec), gbnf(spec), endpoint)
+            raw = call(build_prompt(context, query, cell, spec, anchors,
+                                    question_only), gbnf(spec), endpoint)
         except urllib.error.URLError as e:
             raise SystemExit(f"cannot reach llama-server at {endpoint}: {e}")
         try:

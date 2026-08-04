@@ -18,6 +18,18 @@ MAX_RETRY = 2
 DEFAULT_CONFIRM = 2
 
 
+def _in_query(value, query):
+    """Is this value literally present in the question? The runtime's only
+    domain-agnostic defence against a model attributing a value it read from
+    a chunk about something else."""
+    return str(value).lower() in query.lower()
+
+
+def _anchors(net):
+    return {n: c.value for n, c in net.cells.items()
+            if c.spec.get("anchor") and c.bound}
+
+
 @dataclass
 class Result:
     status: str
@@ -58,10 +70,28 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
         cell = open_cells[0]
         spec = net.cells[cell].spec
         bound = False
+        anchors = _anchors(net)
+        # With no anchor bound, a source-scoped value cannot be attributed to
+        # any subject. Only the question itself is a legitimate source.
+        question_only = (spec.get("scope") == "query"
+                         or (spec.get("requires_anchor") and not anchors))
+
         for _ in range(max_retry + 1):
-            value = pending.pop(cell) if cell in pending else proposer(cell, spec, query)
+            if cell in pending:
+                value = pending.pop(cell)
+            else:
+                try:
+                    value = proposer(cell, spec, query, anchors=anchors,
+                                     question_only=question_only)
+                except TypeError:
+                    value = proposer(cell, spec, query)
             if value is None:
                 break
+            if question_only and not _in_query(value, query):
+                rejected.append((cell, value, "not stated in the question"))
+                if verbose:
+                    print(f"    rejected {cell}={value!r}: not in question")
+                continue
             try:
                 net.try_propose(cell, value, chunk_id="?", confidence=1.0)
                 bound = True
@@ -88,7 +118,11 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
                  and c.spec.get("confirmable", c.spec.get("askable", True))]
         cands.sort(key=lambda n: net.cells[n].spec.get("ask_cost", 100))
         for cell in cands[:confirm]:
-            v = proposer(cell, net.cells[cell].spec, query)
+            try:
+                v = proposer(cell, net.cells[cell].spec, query,
+                             anchors=_anchors(net), question_only=False)
+            except TypeError:
+                v = proposer(cell, net.cells[cell].spec, query)
             net.model_calls += 1
             if v is None:
                 continue
