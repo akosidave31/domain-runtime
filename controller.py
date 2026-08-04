@@ -63,8 +63,7 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
             if value is None:
                 break
             try:
-                net.propose(cell, value, chunk_id="?", confidence=1.0)
-                net.propagate()
+                net.try_propose(cell, value, chunk_id="?", confidence=1.0)
                 bound = True
                 break
             except Contradiction as e:
@@ -76,8 +75,7 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
 
     for cell, value in pending.items():
         try:
-            net.propose(cell, value, chunk_id="?", confidence=1.0)
-            net.propagate()
+            net.try_propose(cell, value, chunk_id="?", confidence=1.0)
         except Contradiction as e:
             rejected.append((cell, value, str(e)))
 

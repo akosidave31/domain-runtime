@@ -27,11 +27,18 @@ def build_prompt(context, query, cell, spec):
     else:
         lo, hi = spec.get("range", ["?", "?"])
         allowed = f"An integer between {lo} and {hi}, or null."
-    system = ("You extract a single value from the SOURCE below. "
-              "Answer only from the SOURCE. If the SOURCE does not state the "
-              "value, answer null. Never guess, never calculate from memory, "
-              "never use knowledge outside the SOURCE. Answering null is "
-              "correct and expected when the value is absent.")
+    if spec.get("scope") == "query":
+        system = ("You read the USER QUESTION and report one thing it "
+                  "specifies. Report it ONLY if the QUESTION itself names it. "
+                  "The SOURCE is background: never take this value from the "
+                  "SOURCE. If the QUESTION does not name it, answer null. "
+                  "Answering null is correct and expected.")
+    else:
+        system = ("You extract a single value from the SOURCE below. "
+                  "Answer only from the SOURCE. If the SOURCE does not state "
+                  "the value, answer null. Never guess, never calculate from "
+                  "memory, never use knowledge outside the SOURCE. Answering "
+                  "null is correct and expected when the value is absent.")
     user = (f"SOURCE:\n{context}\n\nUSER QUESTION: {query}\n\n"
             f"EXTRACT: {ask}\nALLOWED: {allowed}\n\nReply with JSON only.")
     return (f"<|im_start|>system\n{system}<|im_end|>\n"

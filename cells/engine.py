@@ -81,6 +81,37 @@ class Network:
         return self.bind(name, value, "proposal",
                          confidence=confidence, chunk_id=chunk_id)
 
+    def _snapshot(self):
+        return ({n: (c.value, c.source, c.confidence, c.chunk_id,
+                     tuple(c.justification)) for n, c in self.cells.items()},
+                self.derived)
+
+    def _restore(self, snap):
+        state, derived = snap
+        for n, (v, src, cf, ch, j) in state.items():
+            c = self.cells[n]
+            c.value, c.source, c.confidence = v, src, cf
+            c.chunk_id, c.justification = ch, list(j)
+        self.derived = derived
+
+    def try_propose(self, name, value, *, chunk_id=None, confidence=None):
+        """Atomic: propose + propagate, or leave the network untouched.
+
+        Without this, a proposal that binds cleanly but contradicts two laws
+        later leaves its bad value behind - the contradiction is logged while
+        the corruption stays.
+        """
+        snap = self._snapshot()
+        self.model_calls += 1
+        try:
+            self.bind(name, value, "proposal",
+                      confidence=confidence, chunk_id=chunk_id)
+            self.propagate()
+            return True
+        except Contradiction:
+            self._restore(snap)
+            raise
+
     # ---------- law forms ----------
 
     def _apply_table(self, law):

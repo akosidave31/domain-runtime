@@ -9,6 +9,7 @@ import glob, json, os, random, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from controller import solve as controller_solve
+from retrieve import load_chunks, build_index, context_for
 
 
 def oracle(truth):
@@ -36,24 +37,20 @@ def noisy(truth, rate, rng):
     return p
 
 
-def load_context(pack):
-    parts = [open(f).read()
-             for f in sorted(glob.glob(os.path.join(pack, "knowledge", "*.md")))]
-    if not parts:
-        raise SystemExit(f"no knowledge/*.md in {pack}")
-    return "\n\n".join(parts)
 
 
-def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None):
+def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, topk=2):
     schema = json.load(open(os.path.join(pack, "cells/schema.json")))
     laws = json.load(open(os.path.join(pack, "cells/laws.json")))["laws"]
     cases = json.load(open(os.path.join(pack, "eval/cases.json")))["cases"]
     rng = random.Random(seed)
 
-    llm_proposer = None
+    chunks = idf = None
     if use_llm:
         from llm import make_proposer, ENDPOINT
-        llm_proposer = make_proposer(load_context(pack), endpoint or ENDPOINT, verbose)
+        chunks = load_chunks(pack)
+        idf = build_index(chunks)
+        endpoint = endpoint or ENDPOINT
 
     tot = {"exp": 0, "ok": 0, "wrong": 0, "missing": 0, "open_exp": 0,
            "open_ok": 0, "leaked": 0, "calls": 0, "derived": 0, "bound": 0,
@@ -62,8 +59,11 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None):
 
     for case in cases:
         truth = case.get("truth", {})
-        if llm_proposer is not None:
-            p = llm_proposer
+        if use_llm:
+            ctx = context_for(chunks, idf, case["query"], k=topk)
+            p = make_proposer(ctx, endpoint, verbose)
+            if verbose:
+                print(f"      context: {len(ctx)} chars from top-{topk}")
         else:
             p = oracle(truth) if noise == 0 else noisy(truth, noise, rng)
 
@@ -144,7 +144,9 @@ def main():
     seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 7
     confirm = int(sys.argv[sys.argv.index("--confirm") + 1]) if "--confirm" in sys.argv else 0
     ep = sys.argv[sys.argv.index("--endpoint") + 1] if "--endpoint" in sys.argv else None
-    score(args[0], noise, seed, "--verbose" in sys.argv, confirm, "--llm" in sys.argv, ep)
+    topk = int(sys.argv[sys.argv.index("--topk") + 1]) if "--topk" in sys.argv else 2
+    score(args[0], noise, seed, "--verbose" in sys.argv, confirm,
+          "--llm" in sys.argv, ep, topk)
     return 0
 
 
