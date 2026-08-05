@@ -48,11 +48,36 @@ def _ambiguous_enum(spec, query):
 def _spans(form, query):
     """Every (start, end) where this surface form appears, case-insensitively."""
     f = str(form)
-    pat = r"(?<!\d)" + re.escape(f) + r"(?!\d)" if f.isdigit() else re.escape(f)
+    if f.isdigit():
+        pat = r"(?<!\d)" + re.escape(f) + r"(?!\d)"
+    else:
+        # "network stack" must not bind the Network vector: a value has to
+        # stand as its own word, not sit inside a longer one.
+        pat = r"(?<![A-Za-z])" + re.escape(f) + r"(?![A-Za-z])"
     return [(m.start(), m.end()) for m in re.finditer(pat, query, re.IGNORECASE)]
 
 
-def _enum_hits(spec, query):
+def _near_cue(spec, cue, value, query, max_gap=1):
+    """Does the value sit next to the thing it is a value of?
+
+    "Attack Vector Network" names a vector. "over the network stack ...
+    Attack Vector weight" uses the same word as ordinary English, several
+    words away from the cue. Literal matching cannot tell those apart;
+    adjacency to the cell's own name can.
+    """
+    cue_spans = _spans(cue.replace("_", " "), query)
+    if not cue_spans:
+        return True
+    forms = [value] + list(spec.get("aliases", {}).get(value, []))
+    for vs, ve in [sp for f in forms for sp in _spans(f, query)]:
+        for cs, ce in cue_spans:
+            gap = query[ve:cs] if ve <= cs else query[ce:vs]
+            if len(gap.split()) <= max_gap:
+                return True
+    return False
+
+
+def _enum_hits(spec, query, cue=None):
     """Distinct enum values the question names, longest surface form winning.
 
     CVSS calls AV:A "Adjacent Network". Matching the bare value "Network"
@@ -74,10 +99,14 @@ def _enum_hits(spec, query):
         taken.append((start, end))
         if v not in hits:
             hits.append(v)
+    # Only ever drops a lone candidate. Never resolves a contest -- two
+    # named vectors must stay ambiguous no matter where they sit.
+    if cue and len(hits) == 1 and not _near_cue(spec, cue, hits[0], query):
+        return []
     return hits
 
 
-def _grounded(spec, value, query):
+def _grounded(spec, cell, value, query):
     """Is this proposal supported by the question itself?
 
     For enums the question must name exactly one candidate, and it must be
@@ -85,7 +114,7 @@ def _grounded(spec, value, query):
     _bind_from_query already declined to guess at.
     """
     if spec.get("type") == "enum":
-        hits = _enum_hits(spec, query)
+        hits = _enum_hits(spec, query, cue=cell)
         return len(hits) == 1 and value in hits
     return _in_query(value, query)
 
@@ -108,7 +137,7 @@ def _bind_from_query(net, query):
             continue
         if cell.spec.get("type") != "enum":
             continue
-        hits = _enum_hits(cell.spec, query)
+        hits = _enum_hits(cell.spec, query, cue=name)
         if len(hits) == 1:
             net.bind(name, hits[0], "query-literal")
             bound.append(name)
@@ -200,7 +229,7 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
             if value is None:
                 break
             if (question_only or (spec.get("scope") == "source" and not anchors)) \
-                    and not _grounded(spec, value, query):
+                    and not _grounded(spec, cell, value, query):
                 rejected.append((cell, value, "not stated in the question"))
                 if verbose:
                     print(f"    rejected {cell}={value!r}: not in question")
