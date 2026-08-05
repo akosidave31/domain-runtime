@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+prov_*.json
+patch_*.py
+probe_*.py
+*.bak*
