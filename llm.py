@@ -9,6 +9,8 @@ def gbnf(spec):
     if spec.get("type") == "enum":
         alts = " | ".join('"\\"%s\\""' % v for v in spec["values"])
         val = f"({alts} | \"null\")"
+    elif spec.get("type") == "decimal":
+        val = '([0-9]+ ("." [0-9]+)? | "null")'
     else:
         val = '([0-9]+ | "null")'
     return (
@@ -26,7 +28,11 @@ def build_prompt(context, query, cell, spec, anchors=None, question_only=False):
         allowed = "One of: " + ", ".join(map(str, spec["values"])) + ", or null."
     else:
         lo, hi = spec.get("range", ["?", "?"])
-        allowed = f"An integer between {lo} and {hi}, or null."
+        if spec.get("type") == "decimal":
+            allowed = (f"A number between {lo} and {hi} with at most "
+                       f"{spec.get('scale', 2)} decimal places, or null.")
+        else:
+            allowed = f"An integer between {lo} and {hi}, or null."
     if question_only:
         # Do not send the SOURCE at all. If it must not be used, its absence
         # is a stronger guarantee than an instruction, and the prompt is
@@ -91,6 +97,8 @@ def make_proposer(context, endpoint=ENDPOINT, verbose=False):
                 return int(v)
             except (TypeError, ValueError):
                 return None
+        if spec.get("type") == "decimal":
+            return str(v)      # engine converts; str keeps it exact
         return v
     return propose
 

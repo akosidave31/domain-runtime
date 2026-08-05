@@ -10,6 +10,7 @@ set of law forms. There is no eval(), no exec(), no import of pack code.
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 
@@ -47,10 +48,31 @@ class Network:
 
     # ---------- binding ----------
 
+    @staticmethod
+    def _dec(v):
+        """Exact decimal. Never float: 0.1 + 0.2 != 0.3 would break equality."""
+        try:
+            return Decimal(str(v))
+        except InvalidOperation:
+            return None
+
     def _check_spec(self, cell: Cell, value):
         s = cell.spec
         if s.get("type") == "enum" and value not in s["values"]:
             raise Contradiction(cell.name, s["values"], value, "enum-spec")
+        if s.get("type") == "decimal":
+            d = self._dec(value)
+            if d is None:
+                raise Contradiction(cell.name, "a decimal", value, "type-spec")
+            scale = s.get("scale", 2)
+            if -d.as_tuple().exponent > scale:
+                # finer than the domain can express: the same impossibility
+                # that a non-integer k represents for an int cell
+                raise Contradiction(cell.name, f"scale <= {scale}",
+                                    str(d), "scale-spec")
+            lo, hi = s.get("range", [None, None])
+            if lo is not None and not (self._dec(lo) <= d <= self._dec(hi)):
+                raise Contradiction(cell.name, f"[{lo},{hi}]", value, "range-spec")
         if s.get("type") == "int":
             if not isinstance(value, int):
                 raise Contradiction(cell.name, "int", value, "type-spec")
@@ -62,6 +84,8 @@ class Network:
              justification=None):
         cell = self.cells[name]
         self._check_spec(cell, value)
+        if cell.spec.get("type") == "decimal":
+            value = self._dec(value)
         if cell.bound:
             if cell.value != value:
                 raise Contradiction(name, cell.value, value, source)
@@ -128,18 +152,61 @@ class Network:
             for col in law.get("identifying", []):
                 c = self.cells.get(col)
                 if c and c.bound:
-                    hits = [k for k, r in law["rows"].items() if r.get(col) == c.value]
+                    # compare in the cell's own representation: a stored
+                    # Decimal('0.55') will not equal the raw JSON float 0.55
+                    def _same(rv):
+                        if rv is None:
+                            return False
+                        if c.spec.get("type") == "decimal":
+                            return self._dec(rv) == c.value
+                        return rv == c.value
+                    hits = [k for k, r in law["rows"].items() if _same(r.get(col))]
                     if len(hits) == 1:
                         changed |= self.bind(key, hits[0], law["id"], justification=[col])
         return changed
 
+    def _fit(self, cell, value, law_id):
+        """Coerce a derived value to the cell's type, or declare it impossible.
+
+        This generalises the integer divisibility check: a non-integer for an
+        int cell and a value finer than the declared scale for a decimal cell
+        are the same kind of error - the law's own arithmetic says this value
+        cannot hold.
+        """
+        spec = cell.spec
+        if spec.get("type") == "int":
+            if isinstance(value, Decimal):
+                if value != value.to_integral_value():
+                    raise Contradiction(cell.name, "an integer",
+                                        str(value), law_id)
+                return int(value)
+            return value
+        if spec.get("type") == "decimal":
+            d = self._dec(value)
+            scale = spec.get("scale", 2)
+            q = d.quantize(Decimal(1).scaleb(-scale))
+            if q != d:
+                raise Contradiction(cell.name, f"scale <= {scale}",
+                                    str(d), law_id)
+            return q
+        return value
+
     def _apply_affine(self, law):
         """target = a * source + b   (bidirectional)"""
-        t, s, a, b = self.cells[law["target"]], self.cells[law["source"]], law["a"], law["b"]
+        t, s = self.cells[law["target"]], self.cells[law["source"]]
+        a, b = law["a"], law["b"]
+        if "decimal" in (t.spec.get("type"), s.spec.get("type")) \
+                or isinstance(a, float) or isinstance(b, float):
+            a, b = self._dec(a), self._dec(b)
+
         if s.bound and not t.bound:
-            return self.bind(t.name, a * s.value + b, law["id"], justification=[s.name])
+            v = self._fit(t, a * s.value + b, law["id"])
+            return self.bind(t.name, v, law["id"], justification=[s.name])
         if t.bound and not s.bound and a != 0:
             num = t.value - b
+            if isinstance(a, Decimal) or isinstance(num, Decimal):
+                v = self._fit(s, self._dec(num) / self._dec(a), law["id"])
+                return self.bind(s.name, v, law["id"], justification=[t.name])
             if num % a:
                 # target implies a non-integer source, but the source is an
                 # int cell. The target value is impossible under this law -

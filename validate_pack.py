@@ -4,7 +4,7 @@ import json, os, sys
 
 CV = "0.1"
 FORMS = {"constant", "table", "affine", "bilinear"}
-TYPES = {"int", "enum"}
+TYPES = {"int", "enum", "decimal"}
 E, W = [], []
 
 
@@ -19,6 +19,20 @@ def load(p, n):
 
 def val_ok(loc, cell, v, cells):
     s = cells[cell]
+    if s.get("type") == "decimal":
+        from decimal import Decimal, InvalidOperation
+        try:
+            d = Decimal(str(v))
+        except InvalidOperation:
+            E.append(f"{loc}: {v!r} for {cell!r} is not a decimal"); return
+        if -d.as_tuple().exponent > s.get("scale", 2):
+            E.append(f"{loc}: {v} for {cell!r} is finer than scale "
+                     f"{s.get('scale', 2)}")
+        r = s.get("range")
+        if isinstance(r, list) and len(r) == 2:
+            if not (Decimal(str(r[0])) <= d <= Decimal(str(r[1]))):
+                E.append(f"{loc}: {v} for {cell!r} outside {r}")
+        return
     if s.get("type") == "enum" and v not in s.get("values", []):
         E.append(f"{loc}: {v!r} not in enum of {cell!r}")
     elif s.get("type") == "int":
@@ -46,6 +60,16 @@ def check_schema(sch):
                 E.append(f"{L}: enum needs non-empty 'values'")
             elif len(set(map(str, v))) != len(v):
                 E.append(f"{L}: duplicate values")
+        if t == "decimal":
+            sc = s.get("scale")
+            if not isinstance(sc, int) or not (0 < sc <= 6):
+                E.append(f"{L}: decimal needs 'scale', an int 1-6")
+            r = s.get("range")
+            if not (isinstance(r, list) and len(r) == 2
+                    and all(isinstance(x, (int, float)) for x in r)):
+                E.append(f"{L}: decimal needs 'range': [lo, hi]")
+            elif r[0] > r[1]:
+                E.append(f"{L}: range lo>hi")
         if t == "int":
             r = s.get("range")
             if not (isinstance(r, list) and len(r) == 2 and all(isinstance(x, int) for x in r)):
