@@ -55,7 +55,8 @@ def noisy(truth, rate, rng):
 
 
 
-def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, topk=2):
+def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, topk=2,
+          dump=None):
     schema = json.load(open(os.path.join(pack, "cells/schema.json")))
     laws = json.load(open(os.path.join(pack, "cells/laws.json")))["laws"]
     cases = json.load(open(os.path.join(pack, "eval/cases.json")))["cases"]
@@ -72,6 +73,7 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
            "open_ok": 0, "leaked": 0, "calls": 0, "derived": 0, "bound": 0,
            "rejected": 0, "conflicts": 0, "silent": 0}
     failures = []
+    prov = {}
 
     for case in cases:
         truth = case.get("truth", {})
@@ -89,6 +91,7 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
         r = controller_solve(schema, laws, case["query"], p, confirm=confirm,
                              force=case.get("inject"), verbose=verbose)
         net, rejected, conflict = r.net, r.rejected, r.conflict
+        flagged = {conflict[0]} if conflict else set()
         if conflict:
             tot["conflicts"] += 1
 
@@ -102,7 +105,7 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
                 failures.append((case["id"], cell, want, "unresolved"))
             else:
                 tot["wrong"] += 1
-                if not conflict:
+                if cell not in flagged:
                     tot["silent"] += 1
                 failures.append((case["id"], cell, want, got))
 
@@ -119,6 +122,20 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
         tot["derived"] += s["derived"]
         tot["bound"] += s["bound"]
         tot["rejected"] += len(rejected)
+
+        if dump is not None:
+            cells = {}
+            for nm, c in net.cells.items():
+                if not getattr(c, "bound", False):
+                    continue
+                cs = getattr(c, "source", None)
+                cells[nm] = {"value": c.value, "source": cs,
+                             "origin": "proposal" if cs in ("proposal", None) else "derived"}
+            prov[case["id"]] = {"query": case.get("query"),
+                                "status": getattr(r, "status", None),
+                                "calls": s["model_calls"], "derived": s["derived"],
+                                "bound": s["bound"], "conflict": bool(conflict),
+                                "rejected": [str(x) for x in rejected], "cells": cells}
         if verbose:
             print(f"      status={r.status} calls={s['model_calls']} "
                   f"ratio={s['propagation_ratio']} rejected={len(rejected)}")
@@ -148,6 +165,11 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
         print("\n  failures:")
         for cid, cell, want, got in failures:
             print(f"    {cid:<24} {cell:<12} want {want!r}, got {got!r}")
+    if dump is not None:
+        json.dump(prov, open(dump, "w"), indent=2, default=str, sort_keys=True)
+        rt = sum(1 for cc in prov.values() for c2 in cc["cells"].values() if c2["origin"] == "proposal")
+        print("\n  provenance -> %s  (%d cases, %d proposal-sourced cells)" % (dump, len(prov), rt))
+
     return acc, abst, ratio
 
 
@@ -161,8 +183,9 @@ def main():
     confirm = int(sys.argv[sys.argv.index("--confirm") + 1]) if "--confirm" in sys.argv else 0
     ep = sys.argv[sys.argv.index("--endpoint") + 1] if "--endpoint" in sys.argv else None
     topk = int(sys.argv[sys.argv.index("--topk") + 1]) if "--topk" in sys.argv else 2
+    dump = sys.argv[sys.argv.index("--dump") + 1] if "--dump" in sys.argv else None
     score(args[0], noise, seed, "--verbose" in sys.argv, confirm,
-          "--llm" in sys.argv, ep, topk)
+          "--llm" in sys.argv, ep, topk, dump)
     return 0
 
 

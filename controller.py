@@ -33,6 +33,18 @@ def _in_query(value, query):
     return v.lower() in query.lower()
 
 
+def _ambiguous_enum(spec, query):
+    """More than one allowed value appears literally in the question.
+
+    _bind_from_query already refuses to guess when a query names several
+    candidates. A proposal that picks one of them must not pass grounding
+    either, or the model gets to resolve an ambiguity the rules declined.
+    """
+    if spec.get("type") != "enum":
+        return False
+    return sum(1 for v in spec.get("values", []) if _in_query(v, query)) > 1
+
+
 def _bind_from_query(net, query):
     """Bind query-scoped enum cells by literal match. No model call.
 
@@ -129,7 +141,7 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
         # With no anchor bound, a source-scoped value cannot be attributed to
         # any subject. Only the question itself is a legitimate source.
         question_only = (spec.get("scope") == "query"
-                         or (spec.get("requires_anchor") and not anchors))
+                         or False)
 
         for _ in range(max_retry + 1):
             if cell in pending:
@@ -142,7 +154,8 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
                     value = proposer(cell, spec, query)
             if value is None:
                 break
-            if question_only and not _in_query(value, query):
+            if (question_only or (spec.get("scope") == "source" and not anchors)) \
+                    and (_ambiguous_enum(spec, query) or not _in_query(value, query)):
                 rejected.append((cell, value, "not stated in the question"))
                 if verbose:
                     print(f"    rejected {cell}={value!r}: not in question")
