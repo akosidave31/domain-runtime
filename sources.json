@@ -1,5 +1,6 @@
 {
   "packs": [
-    "../pack-pqc"
+    "../pack-pqc",
+    "../pack-quantum"
   ]
 }
