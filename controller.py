@@ -162,6 +162,21 @@ def _plausible(schema, laws, cell, value):
         return False
 
 
+def _ask(net, proposer, cell, spec, query, anchors=None, question_only=False):
+    """Invoke the proposer and count it.
+
+    One logical call: the TypeError retry is a signature fallback for
+    proposers that predate the anchors/question_only kwargs, not a second
+    trip to the model.
+    """
+    net.model_calls += 1
+    try:
+        return proposer(cell, spec, query, anchors=anchors,
+                        question_only=question_only)
+    except TypeError:
+        return proposer(cell, spec, query)
+
+
 def _anchors(net):
     return {n: c.value for n, c in net.cells.items()
             if c.spec.get("anchor") and c.bound}
@@ -221,11 +236,8 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
             if cell in pending:
                 value = pending.pop(cell)
             else:
-                try:
-                    value = proposer(cell, spec, query, anchors=anchors,
-                                     question_only=question_only)
-                except TypeError:
-                    value = proposer(cell, spec, query)
+                value = _ask(net, proposer, cell, spec, query,
+                             anchors=anchors, question_only=question_only)
             if value is None:
                 break
             if (question_only or (spec.get("scope") == "source" and not anchors)) \
@@ -268,12 +280,8 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
                  and c.spec.get("confirmable", c.spec.get("askable", True))]
         cands.sort(key=lambda n: net.cells[n].spec.get("ask_cost", 100))
         for cell in cands[:confirm]:
-            try:
-                v = proposer(cell, net.cells[cell].spec, query,
-                             anchors=_anchors(net), question_only=False)
-            except TypeError:
-                v = proposer(cell, net.cells[cell].spec, query)
-            net.model_calls += 1
+            v = _ask(net, proposer, cell, net.cells[cell].spec, query,
+                     anchors=_anchors(net), question_only=False)
             if v is None:
                 continue
             if v == net.cells[cell].value:
