@@ -96,6 +96,22 @@ most of the network - the difference between one model call and six.
 model does not know that "private key" and "decapsulation key" are the same
 cell unless the prompt says so.
 
+**Ranges are part of the verification layer, not documentation.** A law only
+rejects a wrong value if it is restrictive. ek = 384k + 32 rejects roughly
+99.7% of integers, so a misattributed value almost always collides with it.
+classical = 2*quantum rejects only 50% - evenness is a weak constraint - so a
+wrong-but-even value passes silently. This is exactly what happened: asked for
+classical_bits on "a primitive offers 96 bits of quantum security", the model
+proposed 96, which is in the query, in range, and even. Nothing caught it.
+
+Tightening key_bits and classical_bits from [8, 1024] to [128, 256] - the
+domain's actual span - fixed it with no runtime change. The spec check
+rejected 96 before any law ran.
+
+So: declare the narrowest range the domain actually permits, not the widest
+one that is technically safe. A loose range is a hole, and the weaker a
+pack's laws are, the more the ranges have to carry.
+
 ## 5. Law forms
 
 - constant: cell = value
@@ -141,3 +157,8 @@ half-loaded. Bump on any change to sections 3-5.
 
 v0.2: added scope, anchor, requires_anchor, confirmable; removed grammar/ as
 a required directory; added the section 0 rule.
+
+v0.2.1: ranges documented as part of the verification layer, after pack-quantum
+showed a weak law (classical = 2*quantum) letting a misattributed value through
+where a strong one (ek = 384k + 32) would have caught it. No format change, so
+no contract_version bump - packs written against 0.1 still load.
