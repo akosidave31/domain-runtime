@@ -9,6 +9,22 @@ import glob, json, os, random, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from controller import solve as controller_solve
+from decimal import Decimal
+
+
+def _eq(spec, got, want):
+    """Compare in the cell's own representation.
+
+    A decimal cell holds Decimal('0.85'); the eval file holds the JSON float
+    0.85. They are the same value and must compare equal, or every decimal
+    pack fails its own eval for no reason.
+    """
+    if spec.get("type") == "decimal" and got is not None and want is not None:
+        try:
+            return Decimal(str(got)) == Decimal(str(want))
+        except Exception:
+            return False
+    return got == want
 from retrieve import load_chunks, build_index, context_for
 
 
@@ -79,7 +95,7 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
         for cell, want in case.get("expect", {}).items():
             tot["exp"] += 1
             got = net.cells[cell].value
-            if got == want:
+            if _eq(net.cells[cell].spec, got, want):
                 tot["ok"] += 1
             elif got is None:
                 tot["missing"] += 1

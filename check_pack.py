@@ -17,6 +17,22 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cells.engine import Network, Contradiction
 from retrieve import load_chunks
+from decimal import Decimal
+
+
+def _eq(spec, got, want):
+    """Compare in the cell's own representation.
+
+    A decimal cell holds Decimal('0.85'); the eval file holds the JSON float
+    0.85. They are the same value and must compare equal, or every decimal
+    pack fails its own eval for no reason.
+    """
+    if spec.get("type") == "decimal" and got is not None and want is not None:
+        try:
+            return Decimal(str(got)) == Decimal(str(want))
+        except Exception:
+            return False
+    return got == want
 
 E, W = [], []
 
@@ -75,7 +91,17 @@ def check_corpus_coverage(pack, schema, laws):
             if rowkey.lower() not in text:
                 err(f"table key {rowkey!r} never appears in knowledge/")
             for cell, val in row.items():
-                if not re.search(r"(?<!\d)" + str(val) + r"(?!\d)", text):
+                spec = schema["cells"].get(cell, {})
+                forms = {str(val)}
+                if spec.get("type") == "decimal":
+                    # 0.2 in the law and "0.20" in the corpus are the same
+                    # value; the model reads either and the engine agrees
+                    d = Decimal(str(val))
+                    sc = spec.get("scale", 2)
+                    forms.add(str(d.quantize(Decimal(1).scaleb(-sc))))
+                    forms.add(str(d.normalize()))
+                if not any(re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text)
+                           for f in forms):
                     err(f"{rowkey}.{cell} = {val} never appears in knowledge/ - "
                         f"the model cannot read it, only propagation can "
                         f"produce it")
@@ -136,7 +162,7 @@ def check_eval_derivable(schema, laws, cases):
             if got is None:
                 err(f"eval case {c['id']!r} expects {cell}={want} but truth "
                     f"{truth} does not determine it - unwinnable case")
-            elif got != want:
+            elif not _eq(net.cells[cell].spec, got, want):
                 err(f"eval case {c['id']!r} expects {cell}={want} but the laws "
                     f"derive {got} - the case or the laws are wrong")
         for cell in c.get("expect_open", []):

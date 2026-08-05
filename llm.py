@@ -11,6 +11,8 @@ def gbnf(spec):
         val = f"({alts} | \"null\")"
     elif spec.get("type") == "decimal":
         val = '([0-9]+ ("." [0-9]+)? | "null")'
+    elif spec.get("type") == "decimal":
+        val = '([0-9]+ ("." [0-9]+)? | "null")'
     else:
         val = '([0-9]+ | "null")'
     return (
