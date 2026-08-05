@@ -45,6 +45,51 @@ def _ambiguous_enum(spec, query):
     return sum(1 for v in spec.get("values", []) if _in_query(v, query)) > 1
 
 
+def _spans(form, query):
+    """Every (start, end) where this surface form appears, case-insensitively."""
+    f = str(form)
+    pat = r"(?<!\d)" + re.escape(f) + r"(?!\d)" if f.isdigit() else re.escape(f)
+    return [(m.start(), m.end()) for m in re.finditer(pat, query, re.IGNORECASE)]
+
+
+def _enum_hits(spec, query):
+    """Distinct enum values the question names, longest surface form winning.
+
+    CVSS calls AV:A "Adjacent Network". Matching the bare value "Network"
+    inside that phrase reports two candidates where a reader sees one, so a
+    match falling inside an already-consumed longer match is discarded.
+    Aliases let a value carry surface forms longer than the value itself.
+    """
+    aliases = spec.get("aliases", {})
+    cands = []
+    for v in spec.get("values", []):
+        for form in [v] + list(aliases.get(v, [])):
+            for start, end in _spans(form, query):
+                cands.append((end - start, start, end, v))
+    cands.sort(key=lambda t: (-t[0], t[1]))
+    taken, hits = [], []
+    for _, start, end, v in cands:
+        if any(start < te and ts < end for ts, te in taken):
+            continue
+        taken.append((start, end))
+        if v not in hits:
+            hits.append(v)
+    return hits
+
+
+def _grounded(spec, value, query):
+    """Is this proposal supported by the question itself?
+
+    For enums the question must name exactly one candidate, and it must be
+    the one proposed - otherwise the model is resolving an ambiguity that
+    _bind_from_query already declined to guess at.
+    """
+    if spec.get("type") == "enum":
+        hits = _enum_hits(spec, query)
+        return len(hits) == 1 and value in hits
+    return _in_query(value, query)
+
+
 def _bind_from_query(net, query):
     """Bind query-scoped enum cells by literal match. No model call.
 
@@ -63,7 +108,7 @@ def _bind_from_query(net, query):
             continue
         if cell.spec.get("type") != "enum":
             continue
-        hits = [v for v in cell.spec["values"] if _in_query(v, query)]
+        hits = _enum_hits(cell.spec, query)
         if len(hits) == 1:
             net.bind(name, hits[0], "query-literal")
             bound.append(name)
@@ -155,7 +200,7 @@ def solve(schema, laws, query, proposer, confirm=DEFAULT_CONFIRM,
             if value is None:
                 break
             if (question_only or (spec.get("scope") == "source" and not anchors)) \
-                    and (_ambiguous_enum(spec, query) or not _in_query(value, query)):
+                    and not _grounded(spec, value, query):
                 rejected.append((cell, value, "not stated in the question"))
                 if verbose:
                     print(f"    rejected {cell}={value!r}: not in question")
