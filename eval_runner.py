@@ -75,7 +75,30 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
     failures = []
     prov = {}
 
+    # --- crash-safe provenance (patch_crash_dump_v1) -----------------------
+    import atexit
+    _crash = {"case": None}
+    _done = {"ok": False}
+
+    def _emergency_dump():
+        if _done["ok"] or dump is None or not prov:
+            return
+        part = dump + ".partial"
+        try:
+            json.dump(prov, open(part, "w"), indent=2,
+                      default=str, sort_keys=True)
+        except Exception as e:
+            print(f"\n  could not write partial provenance: {e}")
+            return
+        print(f"\n  CRASHED during case {_crash['case']!r}")
+        print(f"  partial provenance -> {part} "
+              f"({len(prov)} case(s) completed)")
+
+    atexit.register(_emergency_dump)
+    # -----------------------------------------------------------------------
+
     for case in cases:
+        _crash["case"] = case.get("id")
         truth = case.get("truth", {})
         if use_llm:
             ctx = context_for(chunks, idf, case["query"], k=topk)
@@ -167,6 +190,7 @@ def score(pack, noise, seed, verbose, confirm=0, use_llm=False, endpoint=None, t
             print(f"    {cid:<24} {cell:<12} want {want!r}, got {got!r}")
     if dump is not None:
         json.dump(prov, open(dump, "w"), indent=2, default=str, sort_keys=True)
+        _done["ok"] = True
         rt = sum(1 for cc in prov.values() for c2 in cc["cells"].values() if c2["origin"] == "proposal")
         print("\n  provenance -> %s  (%d cases, %d proposal-sourced cells)" % (dump, len(prov), rt))
 
