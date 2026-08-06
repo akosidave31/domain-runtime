@@ -10,6 +10,20 @@ None means "not in the retrieved context" - a first-class answer that must
 never be turned into a guess.
 """
 import re
+
+# --- added by patch_spans_numeric_v2 ---------------------------------------
+# Ints and decimals alike are numeric forms. str.isdigit() says False for
+# "3.1", which previously routed decimals into the letter-guarded branch.
+_NUMERIC_FORM = re.compile(r"\d+(?:\.\d+)?")
+
+# "CVSS:3.1/AV:N/..." and "CVSS v3.1" name the spec version, not a score.
+_VERSION_PREFIX = re.compile(r"cvss\s*:?\s*v?$", re.IGNORECASE)
+
+
+def _is_version_tag(query, start):
+    """True if the numeric span at `start` is a CVSS spec version, not a value."""
+    return bool(_VERSION_PREFIX.search(query[:start]))
+# --- end patch_spans_numeric_v2 --------------------------------------------
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -48,13 +62,18 @@ def _ambiguous_enum(spec, query):
 def _spans(form, query):
     """Every (start, end) where this surface form appears, case-insensitively."""
     f = str(form)
-    if f.isdigit():
+    if _NUMERIC_FORM.fullmatch(f):
+        # ints AND decimals: 3.1 must not bind inside 13.15
         pat = r"(?<!\d)" + re.escape(f) + r"(?!\d)"
     else:
         # "network stack" must not bind the Network vector: a value has to
         # stand as its own word, not sit inside a longer one.
         pat = r"(?<![A-Za-z])" + re.escape(f) + r"(?![A-Za-z])"
-    return [(m.start(), m.end()) for m in re.finditer(pat, query, re.IGNORECASE)]
+    found = [(m.start(), m.end()) for m in re.finditer(pat, query, re.IGNORECASE)]
+    if _NUMERIC_FORM.fullmatch(f):
+        # a CVSS spec version is not a measured value
+        found = [s for s in found if not _is_version_tag(query, s[0])]
+    return found
 
 
 def _near_cue(spec, cue, value, query, max_gap=1):
@@ -119,6 +138,54 @@ def _grounded(spec, cell, value, query):
     return _in_query(value, query)
 
 
+# A trailing period ends the sentence, not the number: "is 0.62." must
+# still yield 0.62. Only a digit or word char may abut the match.
+NUM_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
+
+
+def _numeric_hits(spec, query, cue=None):
+    """Numbers in the question that could be this cell's value.
+
+    A decimal cell has no candidate list to match against, so the range
+    stands in for one: a number outside it cannot be this cell's value.
+    Same discipline as the enum path -- exactly one survivor or nothing,
+    because resolving between several is a guess.
+    """
+    rng = spec.get("range")
+    if not rng or len(rng) != 2:
+        return []
+    lo, hi = float(rng[0]), float(rng[1])
+    scale = spec.get("scale")
+    hits = []
+    for m in NUM_RE.finditer(query):
+        raw = m.group(0)
+        try:
+            v = float(raw)
+        except ValueError:
+            continue
+        if not (lo <= v <= hi):
+            continue
+        if scale is not None and "." in raw and len(raw.split(".")[1]) > scale:
+            continue
+        if cue and not _near_span(cue, m.start(), m.end(), query):
+            continue
+        if raw not in hits:
+            hits.append(raw)
+    return hits
+
+
+def _near_span(cue, start, end, query, max_gap=2):
+    """Is this span close to the cell's own name?"""
+    cue_spans = _spans(cue.replace("_", " "), query)
+    if not cue_spans:
+        return True
+    for cs, ce in cue_spans:
+        gap = query[end:cs] if end <= cs else query[ce:start]
+        if len(gap.split()) <= max_gap:
+            return True
+    return False
+
+
 def _bind_from_query(net, query):
     """Bind query-scoped enum cells by literal match. No model call.
 
@@ -136,6 +203,11 @@ def _bind_from_query(net, query):
         if cell.bound or cell.spec.get("scope") != "query":
             continue
         if cell.spec.get("type") != "enum":
+            if cell.spec.get("type") in ("decimal", "int"):
+                nhits = _numeric_hits(cell.spec, query, cue=name)
+                if len(nhits) == 1:
+                    net.bind(name, nhits[0], "query-literal")
+                    bound.append(name)
             continue
         hits = _enum_hits(cell.spec, query, cue=name)
         if len(hits) == 1:
