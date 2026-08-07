@@ -226,6 +226,39 @@ def _bind_from_query(net, query):
         if len(hits) == 1:
             net.bind(name, hits[0], "query-literal")
             bound.append(name)
+    # --- source-scoped numerics the question states outright -------------
+    # The question is a legitimate source (see the grounding gate in
+    # solve()). A stated number can bind with no model call, but only when
+    # exactly one cell can claim it. cue_aliases do the discriminating.
+    _cands = []
+    for _n, _c in net.cells.items():
+        if _c.bound or _c.spec.get("scope") != "source":
+            continue
+        _ty = _c.spec.get("type")
+        if _ty not in ("decimal", "int"):
+            continue
+        _al = _c.spec.get("cue_aliases") or ()
+        if not _al:
+            continue
+        if not any(_spans(str(a).replace("_", " "), query) for a in _al):
+            continue
+        _nh = _numeric_hits(_c.spec, query, cue=_n)
+        if len(_nh) != 1:
+            continue
+        # _numeric_hits yields the raw matched string; int cells need an int
+        try:
+            _v = int(_nh[0]) if _ty == "int" else _nh[0]
+        except (TypeError, ValueError):
+            continue
+        _cands.append((_n, _v))
+    _claims = {}
+    for _n, _v in _cands:
+        _claims.setdefault(str(_v), []).append(_n)
+    for _n, _v in _cands:
+        if len(_claims[str(_v)]) != 1:
+            continue  # two cells claim the same number -> abstain
+        net.bind(_n, _v, "query-literal")
+        bound.append(_n)
     return bound
 
 
