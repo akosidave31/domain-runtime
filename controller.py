@@ -167,16 +167,29 @@ def _numeric_hits(spec, query, cue=None):
             continue
         if scale is not None and "." in raw and len(raw.split(".")[1]) > scale:
             continue
-        if cue and not _near_span(cue, m.start(), m.end(), query):
+        if cue and not _near_span(cue, m.start(), m.end(), query,
+                                  aliases=spec.get("cue_aliases", ())):
             continue
         if raw not in hits:
             hits.append(raw)
     return hits
 
 
-def _near_span(cue, start, end, query, max_gap=2):
-    """Is this span close to the cell's own name?"""
-    cue_spans = _spans(cue.replace("_", " "), query)
+def _near_span(cue, start, end, query, max_gap=2, aliases=()):
+    """Is this span close to the cell's own name, or one of its aliases?
+
+    Aliases are surface forms a query actually uses ("classical security"
+    for classical_bits). They only ADD places the cue can be found.
+
+    Fail-open is deliberate: if no cue form appears at all, return True.
+    Failing closed here was measured and cost 17/30 pqc and 6/22 quantum
+    extractions with no abstention gain.
+    """
+    cue_spans = []
+    for form in [cue] + list(aliases or ()):
+        cue_spans = _spans(str(form).replace("_", " "), query)
+        if cue_spans:
+            break
     if not cue_spans:
         return True
     for cs, ce in cue_spans:
